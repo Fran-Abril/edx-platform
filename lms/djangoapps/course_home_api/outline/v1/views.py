@@ -4,6 +4,7 @@ Outline Tab Views
 
 from django.http.response import Http404
 from django.urls import reverse
+from django.utils.html import format_html
 from django.utils.translation import gettext as _
 from edx_django_utils import monitoring as monitoring_utils
 from edx_rest_framework_extensions.auth.jwt.authentication import JwtAuthentication
@@ -19,8 +20,12 @@ from completion.utilities import get_key_to_last_completed_block
 from course_modes.models import CourseMode
 from lms.djangoapps.course_api.blocks.transformers.blocks_api import BlocksAPITransformer
 from lms.djangoapps.course_blocks.api import get_course_block_access_transformers, get_course_blocks
+from lms.djangoapps.course_goals.api import add_course_goal, get_course_goal, get_course_goal_options, \
+    has_course_goal_permission
+from lms.djangoapps.course_goals import models
 from lms.djangoapps.course_home_api.outline.v1.serializers import OutlineTabSerializer
-from lms.djangoapps.course_home_api.toggles import course_home_mfe_dates_tab_is_active, course_home_mfe_outline_tab_is_active
+from lms.djangoapps.course_home_api.toggles import course_home_mfe_dates_tab_is_active, \
+    course_home_mfe_outline_tab_is_active
 from lms.djangoapps.course_home_api.utils import get_microfrontend_url
 from lms.djangoapps.courseware.access import has_access
 from lms.djangoapps.courseware.context_processor import user_timezone_locale_prefs
@@ -45,6 +50,12 @@ class UnableToDismissWelcomeMessage(APIException):
     status_code = 400
     default_detail = 'Unable to dismiss welcome message.'
     default_code = 'unable_to_dismiss_welcome_message'
+
+
+class UnableToSaveCourseGoal(APIException):
+    status_code = 400
+    default_detail = 'Unable to save course goal'
+    default_code = 'unable_to_save_course_goal'
 
 
 class OutlineTabView(RetrieveAPIView):
@@ -73,6 +84,13 @@ class OutlineTabView(RetrieveAPIView):
                     xBlock on the web LMS.
                 children: (list) If the block has child blocks, a list of IDs of
                     the child blocks.
+        course_goals:
+            goal_options: List of serialized goal objects. Each serialization has the following fields:
+                key: (str) The unique id given to the goal.
+                text: (str) The display text for the goal.
+            selected_goal:
+                key: (str) The unique id given to the user's selected goal.
+                text: (str) The display text for the user's selected goal.
         course_tools: List of serialized Course Tool objects. Each serialization has the following fields:
             analytics_id: (str) The unique id given to the tool.
             title: (str) The display title of the tool.
@@ -209,9 +227,35 @@ class OutlineTabView(RetrieveAPIView):
             'user_timezone': user_timezone,
         }
 
+        # Only show the set course goal message for enrolled, unverified
+        # users in a course that allows for verified statuses.
+        is_already_verified = CourseEnrollment.is_enrolled_as_verified(request.user, course_key)
+        if has_course_goal_permission(request, course_key_string, {'is_enrolled': is_enrolled}) \
+                and not is_already_verified:
+            goal_options = get_course_goal_options()
+            ordered_goal_options = self.sort_course_goals(goal_options)
+            course_goals = {
+                'goal_options': ordered_goal_options,
+                'selected_goal': None
+            }
+
+            selected_goal = get_course_goal(request.user, course_key)
+            if selected_goal:
+                goal_key = selected_goal.goal_key
+                course_goals['selected_goal'] = {
+                    'key': goal_key,
+                    'text': goal_options[goal_key]
+                }
+        else:
+            course_goals = {
+                'goal_options': None,
+                'selected_goal': None
+            }
+
         data = {
             'course_blocks': course_blocks,
             'course_expired_html': course_expired_html,
+            'course_goals': course_goals,
             'course_tools': course_tools,
             'dates_widget': dates_widget,
             'enroll_alert': enroll_alert,
@@ -226,6 +270,17 @@ class OutlineTabView(RetrieveAPIView):
 
         return Response(serializer.data)
 
+    @classmethod
+    def sort_course_goals(cls, goal_options):
+        ordered_goal_options = [
+            {'key': models.GOAL_KEY_CHOICES.certify, 'text': goal_options[models.GOAL_KEY_CHOICES.certify]},
+            {'key': models.GOAL_KEY_CHOICES.complete, 'text': goal_options[models.GOAL_KEY_CHOICES.complete]},
+            {'key': models.GOAL_KEY_CHOICES.explore, 'text': goal_options[models.GOAL_KEY_CHOICES.explore]},
+            {'key': models.GOAL_KEY_CHOICES.unsure, 'text': goal_options[models.GOAL_KEY_CHOICES.unsure]}
+        ]
+
+        return ordered_goal_options
+
 
 @api_view(['POST'])
 @authentication_classes((JwtAuthentication,))
@@ -233,7 +288,7 @@ class OutlineTabView(RetrieveAPIView):
 def dismiss_welcome_message(request):
     course_id = request.data.get('course_id', None)
 
-    # If body doesnt contain 'course_id', return 400 to client.
+    # If body doesn't contain 'course_id', return 400 to client.
     if not course_id:
         raise ParseError(_("'course_id' is required."))
 
@@ -247,3 +302,30 @@ def dismiss_welcome_message(request):
         return Response({'message': _('Welcome message successfully dismissed.')})
     except Exception:
         raise UnableToDismissWelcomeMessage
+
+
+@api_view(['POST'])
+@authentication_classes((JwtAuthentication,))
+@permission_classes((IsAuthenticated,))
+def save_course_goal(request):
+    course_id = request.data.get('course_id', None)
+    goal_key = request.data.get('goal_key', None)
+
+    # If body doesn't contain 'course_id', return 400 to client.
+    if not course_id:
+        raise ParseError(_("'course_id' is required."))
+
+    # If body doesn't contain 'goal', return 400 to client.
+    if not goal_key:
+        raise ParseError(_("'goal_key' is required."))
+
+    try:
+        add_course_goal(request.user, course_id, goal_key)
+        return Response({
+            'header': format_html(
+                '<p class="small m-0">{}</p>', _('Your course goal has been successfully set.')
+            ),
+            'message': _('Course goal updated successfully.'),
+        })
+    except Exception:
+        raise UnableToSaveCourseGoal

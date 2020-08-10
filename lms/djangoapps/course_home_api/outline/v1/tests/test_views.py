@@ -35,6 +35,10 @@ class OutlineTabTestViews(BaseCourseHomeTests):
         response = self.client.get(self.url)
         self.assertEqual(response.status_code, 200)
 
+        course_goals = response.data.get('course_goals')
+        if enrollment_mode == CourseMode.VERIFIED:
+            self.assertFalse(course_goals['goal_options'])
+
         course_tools = response.data.get('course_tools')
         self.assertTrue(course_tools)
         self.assertEqual(course_tools[0]['analytics_id'], 'edx.bookmarks')
@@ -55,6 +59,9 @@ class OutlineTabTestViews(BaseCourseHomeTests):
     def test_get_authenticated_user_not_enrolled(self):
         response = self.client.get(self.url)
         self.assertEqual(response.status_code, 200)
+
+        course_goals = response.data.get('course_goals')
+        self.assertFalse(course_goals['goal_options'])
 
         course_tools = response.data.get('course_tools')
         self.assertEqual(len(course_tools), 0)
